@@ -1,0 +1,22 @@
+# Local notes and scratch. Never commit.
+temp/
+
+# Secrets. Never commit.
+.env
+.env.*
+!.env.example
+
+# Gradle / Java
+.gradle/
+build/
+out/
+*.class
+
+# MkDocs
+site/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
