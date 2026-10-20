@@ -5,7 +5,7 @@ Import `io.github.leogan.kiln.Kiln` and `io.github.leogan.kiln.Schema`.
 
 ```kotlin
 dependencies {
-    implementation("io.github.leo-gan:gld-kiln-java:0.1.0")
+    implementation("io.github.leo-gan:gld-kiln-java:0.2.0")
 }
 ```
 
