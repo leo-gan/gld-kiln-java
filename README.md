@@ -22,7 +22,7 @@ package is `io.github.leogan.kiln`. The generator command is `gld-kilngen-java`.
 
 ```kotlin
 dependencies {
-    implementation("io.github.leo-gan:gld-kiln-java:0.1.0")
+    implementation("io.github.leo-gan:gld-kiln-java:0.2.0")
 }
 ```
 
