@@ -1,0 +1,18 @@
+{
+  "title": "Sample",
+  "type": "object",
+  "properties": {
+    "name": {"type": "string"},
+    "blob": {"type": "string", "format": "binary"},
+    "score": {"type": "integer", "format": "int32"},
+    "wide": {"type": "number", "format": "float"},
+    "tags": {"type": "array", "items": {"type": "string"}},
+    "bytes": {"type": "array", "items": {"type": "integer", "format": "uint8"}},
+    "attrs": {
+      "type": "object",
+      "additionalProperties": {"type": "integer", "format": "int32"}
+    },
+    "note": {"type": "string"}
+  },
+  "required": ["name", "blob", "score", "wide", "tags", "bytes", "attrs"]
+}

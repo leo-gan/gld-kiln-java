@@ -1,0 +1,106 @@
+plugins {
+    id 'java'
+    id 'application'
+    id 'maven-publish'
+}
+
+group = 'io.github.leo-gan'
+version = file('VERSION').text.trim()
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+    withSourcesJar()
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.3'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+application {
+    mainClass = 'io.github.leogan.kiln.gen.KilnGen'
+    applicationName = 'gld-kilngen-java'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    dependsOn tasks.named('compileExamplesJava')
+}
+
+sourceSets {
+    test {
+        java {
+            srcDir 'tests/generated'
+        }
+    }
+    examples {
+        java {
+            srcDir 'examples'
+        }
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+    bench {
+        java {
+            srcDir 'benches'
+        }
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+    }
+}
+
+tasks.register('microbench', JavaExec) {
+    group = 'verification'
+    description = 'Encode and decode a small struct batch and one 1024-element f32 tensor.'
+    classpath = sourceSets.bench.runtimeClasspath
+    mainClass = 'io.github.leogan.kiln.bench.Microbench'
+    jvmArgs '-Xms128m', '-Xmx256m'
+}
+
+
+
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+            pom {
+                name = 'gld-kiln-java'
+                description = 'From-scratch Kiln wire v2 for Java'
+                url = 'https://github.com/leo-gan/gld-kiln-java'
+                licenses {
+                    license {
+                        name = 'MIT License'
+                        url = 'https://opensource.org/licenses/MIT'
+                    }
+                }
+                developers {
+                    developer {
+                        id = 'leo-gan'
+                        name = 'Leonid Ganeline'
+                    }
+                }
+                scm {
+                    connection = 'scm:git:https://github.com/leo-gan/gld-kiln-java.git'
+                    url = 'https://github.com/leo-gan/gld-kiln-java'
+                }
+            }
+        }
+    }
+    repositories {
+        maven {
+            name = 'mavenCentral'
+            url = uri('https://central.sonatype.com/api/v1/publisher/upload')
+            credentials {
+                username = System.getenv('MAVEN_USERNAME') ?: ''
+                password = System.getenv('MAVEN_TOKEN') ?: ''
+            }
+        }
+    }
+}
