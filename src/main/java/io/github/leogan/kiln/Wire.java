@@ -48,6 +48,26 @@ public final class Wire {
         return s.getBytes(StandardCharsets.UTF_8);
     }
 
+    /** Bytes 0x00..0x7F. Short ASCII strings avoid a UTF-8 scan and a temporary array. */
+    static boolean ascii(String s) {
+        int n = s.length();
+        for (int i = 0; i < n; i++) {
+            if (s.charAt(i) > 0x7F) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static boolean ascii(byte[] b, int off, int len) {
+        for (int i = off; i < off + len; i++) {
+            if (b[i] < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     public static boolean isUtf8(byte[] b, int off, int len) {
         int i = off;
         int end = off + len;
@@ -180,6 +200,104 @@ public final class Wire {
         return i + 8;
     }
 
+    public static int putF32s(byte[] dest, int offset, float[] values, int cap) {
+        return putPod(dest, offset, values, values.length, 4, Pod.FLOAT, cap);
+    }
+
+    public static int putF64s(byte[] dest, int offset, double[] values, int cap) {
+        return putPod(dest, offset, values, values.length, 8, Pod.DOUBLE, cap);
+    }
+
+    public static int putI64s(byte[] dest, int offset, long[] values, int cap) {
+        return putPod(dest, offset, values, values.length, 8, Pod.LONG, cap);
+    }
+
+    public static int putI32s(byte[] dest, int offset, int[] values, int cap) {
+        return putPod(dest, offset, values, values.length, 4, Pod.INT, cap);
+    }
+
+    public static float[] readF32s(In in, float[] reuse) {
+        int count = in.count(4);
+        float[] out = reuse != null && reuse.length == count ? reuse : Pod.floats(count);
+        readPod(in, out, count, 4, Pod.FLOAT);
+        return out;
+    }
+
+    public static double[] readF64s(In in, double[] reuse) {
+        int count = in.count(8);
+        double[] out = reuse != null && reuse.length == count ? reuse : Pod.doubles(count);
+        readPod(in, out, count, 8, Pod.DOUBLE);
+        return out;
+    }
+
+    public static long[] readI64s(In in, long[] reuse) {
+        int count = in.count(8);
+        long[] out = reuse != null && reuse.length == count ? reuse : Pod.longs(count);
+        readPod(in, out, count, 8, Pod.LONG);
+        return out;
+    }
+
+    public static int[] readI32s(In in, int[] reuse) {
+        int count = in.count(4);
+        int[] out = reuse != null && reuse.length == count ? reuse : Pod.ints(count);
+        readPod(in, out, count, 4, Pod.INT);
+        return out;
+    }
+
+    private static int putPod(byte[] dest, int offset, Object values, int count, int width, long base, int cap) {
+        if (Integer.compareUnsigned(count, cap) > 0) {
+            throw KilnException.limit();
+        }
+        putI32(dest, offset, count);
+        int body = count * width;
+        if (Pod.LITTLE && body > 0) {
+            Pod.toWire(values, base, dest, offset + 4, body);
+            return offset + 4 + body;
+        }
+        int p = offset + 4;
+        for (int i = 0; i < count; i++) {
+            if (width == 4 && values instanceof float[] nums) {
+                p = putF32At(dest, p, nums[i]);
+            } else if (width == 8 && values instanceof double[] nums) {
+                p = putF64At(dest, p, nums[i]);
+            } else if (width == 4) {
+                putI32(dest, p, ((int[]) values)[i]);
+                p += 4;
+            } else {
+                putI64(dest, p, ((long[]) values)[i]);
+                p += 8;
+            }
+        }
+        return p;
+    }
+
+    private static void readPod(In in, Object out, int count, int width, long base) {
+        int body = count * width;
+        if (Pod.LITTLE && body > 0) {
+            Pod.fromWire(in.b, in.p, out, base, body);
+            in.p += body;
+            return;
+        }
+        if (out instanceof float[] nums) {
+            for (int i = 0; i < count; i++) {
+                nums[i] = in.f32();
+            }
+        } else if (out instanceof double[] nums) {
+            for (int i = 0; i < count; i++) {
+                nums[i] = in.f64();
+            }
+        } else if (out instanceof int[] nums) {
+            for (int i = 0; i < count; i++) {
+                nums[i] = in.i32();
+            }
+        } else {
+            long[] nums = (long[]) out;
+            for (int i = 0; i < count; i++) {
+                nums[i] = in.i64();
+            }
+        }
+    }
+
     public static int putF32At(byte[] a, int i, float v) {
         putI32(a, i, Float.floatToRawIntBits(v));
         return i + 4;
@@ -196,6 +314,14 @@ public final class Wire {
     }
 
     public static int putStringAt(byte[] a, int i, String s, int cap) {
+        int n = s.length();
+        if (n <= 64 && n <= cap && ascii(s)) {
+            putI32(a, i, n);
+            for (int k = 0; k < n; k++) {
+                a[i + 4 + k] = (byte) s.charAt(k);
+            }
+            return i + 4 + n;
+        }
         byte[] raw = utf8(s);
         if (raw.length > cap) {
             throw KilnException.limit();
@@ -258,11 +384,17 @@ public final class Wire {
 
     /** Cursor over an input slice. Checks run before any element storage is allocated. */
     public static final class In {
-        public final byte[] b;
+        private static final byte[] EMPTY = new byte[0];
+        private static final int ASCII_SLOTS = 4;
+
+        public byte[] b;
         public int p;
-        public final int end;
-        public final int cap;
-        public final boolean trusted;
+        public int end;
+        public int cap;
+        public boolean trusted;
+        private boolean busy;
+        private String[] ascii;
+        private int asciiAt;
 
         public In(byte[] b, int p, int end, int cap, boolean trusted) {
             this.b = b;
@@ -270,6 +402,32 @@ public final class Wire {
             this.end = end;
             this.cap = cap;
             this.trusted = trusted;
+        }
+
+        static In empty() {
+            return new In(EMPTY, 0, 0, 0, false);
+        }
+
+        /** Rebind this cursor. The previous buffer is not retained after {@link #detach}. */
+        void reset(byte[] buf, int off, int end, int cap, boolean trusted) {
+            this.b = buf;
+            this.p = off;
+            this.end = end;
+            this.cap = cap;
+            this.trusted = trusted;
+            this.busy = true;
+        }
+
+        boolean busy() {
+            return busy;
+        }
+
+        /** Drop the caller's buffer so a reused cursor does not pin it. */
+        void detach() {
+            b = EMPTY;
+            p = 0;
+            end = 0;
+            busy = false;
         }
 
         public static In of(byte[] data) {
@@ -370,6 +528,9 @@ public final class Wire {
             int len = (int) n;
             int off = p;
             p += len;
+            if (len <= 64 && ascii(b, off, len)) {
+                return cachedAscii(off, len);
+            }
             if (!isUtf8(b, off, len)) {
                 if (!trusted) {
                     throw KilnException.utf8();
@@ -413,6 +574,34 @@ public final class Wire {
             if (p != end) {
                 throw KilnException.trailing();
             }
+        }
+
+        /** Repeat ASCII text returns the same String instead of a fresh copy. */
+        private String cachedAscii(int off, int len) {
+            if (ascii == null) {
+                ascii = new String[ASCII_SLOTS];
+            }
+            String[] rows = ascii;
+            for (int i = 0; i < rows.length; i++) {
+                String cached = rows[i];
+                if (cached != null && cached.length() == len && asciiMatch(cached, off)) {
+                    return cached;
+                }
+            }
+            String created = new String(b, off, len, StandardCharsets.ISO_8859_1);
+            rows[asciiAt] = created;
+            asciiAt = (asciiAt + 1) & (ASCII_SLOTS - 1);
+            return created;
+        }
+
+        private boolean asciiMatch(String cached, int off) {
+            int n = cached.length();
+            for (int i = 0; i < n; i++) {
+                if (cached.charAt(i) != (b[off + i] & 0xFF)) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 

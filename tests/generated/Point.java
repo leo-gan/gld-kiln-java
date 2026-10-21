@@ -53,7 +53,10 @@ public final class Point {
     }
 
     public static Point decodeFrom(Wire.In in) {
-        Point value = new Point();
+        return decodeInto(new Point(), in);
+    }
+
+    public static Point decodeInto(Point value, Wire.In in) {
         value.x = in.i32();
         value.y = in.i32();
         if (!in.opt()) {

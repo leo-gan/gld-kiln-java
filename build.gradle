@@ -32,6 +32,7 @@ application {
 tasks.named('test') {
     useJUnitPlatform()
     dependsOn tasks.named('compileExamplesJava')
+    jvmArgs '--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED'
 }
 
 sourceSets {
@@ -61,7 +62,7 @@ tasks.register('microbench', JavaExec) {
     description = 'Encode and decode a small struct batch and one 1024-element f32 tensor.'
     classpath = sourceSets.bench.runtimeClasspath
     mainClass = 'io.github.leogan.kiln.bench.Microbench'
-    jvmArgs '-Xms128m', '-Xmx256m'
+    jvmArgs '-Xms128m', '-Xmx256m', '--add-opens', 'java.base/jdk.internal.misc=ALL-UNNAMED'
 }
 
 

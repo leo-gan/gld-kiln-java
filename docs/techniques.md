@@ -7,9 +7,16 @@ Fields are not encoded into temporary arrays and then concatenated. A caller
 who already has a buffer uses `Kiln.encodeTo` or `Kiln.encodeTensorsTo`.
 `Kiln.encodeFixed` only writes the fixed width of the struct.
 
-Little-endian stores are explicit shifts. `f32` and `f64` use
+Little-endian stores are explicit shifts. A single `f32` or `f64` uses
 `floatToRawIntBits` and `doubleToRawLongBits`, so a sign bit on zero and a
 NaN payload are preserved.
+
+A `float[]`, `double[]`, `int[]` of `i32`, or `long[]` of `i64`/`int`/`u64`/`uint`
+is one `Unsafe.copyMemory` on a little-endian host. `Kiln.Options.withPool`
+copies those lists into a `NumericPool` instead of allocating a fresh array.
+The arrays and struct maps from one decode stay intact until the next decode
+on that pool, which overwrites them in place. Two lists in the same value
+still get distinct arrays. A pool is not safe to share across threads.
 
 ## Tensor payloads
 
@@ -60,6 +67,8 @@ The struct's Java class name is not part of the hash.
 
 `JavaGen` walks structs inside-out, so a nested `$ref` is a class that exists
 before the parent that names it. Optional scalars use boxed fields. `list<u8>`
-and `list<i8>` are `byte[]` so the body stays one copy. Other lists are
-`List`. `additionalProperties` is `Map<String, V>`, sorted on encode.
+and `list<i8>` are `byte[]`. `list<f32>`, `list<f64>`, `list<i32>`, and
+`list<i64>` or `list<int>` are primitive arrays, copied in one call.
+`decodeInto` fills an existing instance so those arrays can be reused. Other
+lists are `List`. `additionalProperties` is `Map<String, V>`, sorted on encode.
 `scripts/check-generated.sh` diffs a fresh emit against `tests/generated`.

@@ -57,6 +57,8 @@ public final class Schema {
     private List<Field> fields;
     private int minSize;
     private int fixedWidth;
+    /** 0 unknown, 1 scalar/string struct, 2 no, 3 currently computing. */
+    private byte leaf;
 
     private Schema(Kind kind, String token, String name, Schema elem, List<Field> fields, int minSize) {
         this.kind = kind;
@@ -136,6 +138,36 @@ public final class Schema {
         this.fields = Collections.unmodifiableList(copy);
         this.minSize = min;
         this.fixedWidth = fixedOf(kind, elem, this.fields, min);
+        this.leaf = 0;
+    }
+
+    /** Struct of scalars and strings only. A direct reader is faster than the generic codec. */
+    boolean fastLeaf() {
+        if (leaf == 1) {
+            return true;
+        }
+        if (leaf == 2 || leaf == 3) {
+            return false;
+        }
+        leaf = 3;
+        boolean ok = kind == Kind.STRUCT;
+        if (ok) {
+            for (Field field : fields) {
+                if (!leafKind(field.type.kind)) {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        leaf = (byte) (ok ? 1 : 2);
+        return ok;
+    }
+
+    private static boolean leafKind(Kind kind) {
+        return switch (kind) {
+            case BOOL, I32, I64, INT, F32, F64, STR -> true;
+            default -> false;
+        };
     }
 
     public List<Field> fields() {

@@ -42,7 +42,10 @@ public final class Meta {
     }
 
     public static Meta decodeFrom(Wire.In in) {
-        Meta value = new Meta();
+        return decodeInto(new Meta(), in);
+    }
+
+    public static Meta decodeInto(Meta value, Wire.In in) {
         value.region = in.str();
         value.flag = in.bool();
         return value;

@@ -135,9 +135,14 @@ public final class JavaGen {
         src.line("");
         src.line("public static " + className + " decodeFrom(Wire.In in) {");
         src.indent++;
-        src.line(className + " value = new " + className + "();");
+        src.line("return decodeInto(new " + className + "(), in);");
+        src.indent--;
+        src.line("}");
+        src.line("");
+        src.line("public static " + className + " decodeInto(" + className + " value, Wire.In in) {");
+        src.indent++;
         for (Schema.Field field : schema.fields()) {
-            readOf(src, field.type, "value." + fieldName(field.name), 0);
+            readInto(src, field.type, "value." + fieldName(field.name), 0);
         }
         src.line("return value;");
         src.indent--;
@@ -241,6 +246,8 @@ public final class JavaGen {
             case LIST -> {
                 if (rawByteList(type)) {
                     src.line("n += 4 + " + expr + ".length;");
+                } else if (podArray(type) != null) {
+                    src.line("n += 4 + " + expr + ".length * " + type.elem.fixedWidth() + ";");
                 } else if (type.elem.fixedWidth() >= 0) {
                     src.line("n += 4 + " + expr + ".size() * " + type.elem.fixedWidth() + ";");
                 } else {
@@ -304,6 +311,8 @@ public final class JavaGen {
             case LIST -> {
                 if (rawByteList(type)) {
                     src.line("o = Wire.putRawAt(out, o, " + expr + ", 0, " + expr + ".length, Wire.DEFAULT_CAP);");
+                } else if (podArray(type) != null) {
+                    src.line("o = Wire." + podPut(type) + "(out, o, " + expr + ", Wire.DEFAULT_CAP);");
                 } else {
                     String item = src.fresh("item");
                     src.line("o = Wire.putU32At(out, o, " + expr + ".size());");
@@ -329,6 +338,24 @@ public final class JavaGen {
             }
             default -> throw new IllegalArgumentException("cannot write " + type.kind);
         }
+    }
+
+    private static void readInto(Src src, Schema type, String dest, int depth) {
+        if (podArray(type) != null) {
+            src.line(dest + " = Wire." + podRead(type) + "(in, " + dest + ");");
+            return;
+        }
+        if (type.kind == Schema.Kind.STRUCT) {
+            String typeName = className(type.name);
+            src.line("if (" + dest + " == null) {");
+            src.indent++;
+            src.line(dest + " = new " + typeName + "();");
+            src.indent--;
+            src.line("}");
+            src.line(typeName + ".decodeInto(" + dest + ", in);");
+            return;
+        }
+        readOf(src, type, dest, depth);
     }
 
     private static void readOf(Src src, Schema type, String dest, int depth) {
@@ -365,6 +392,8 @@ public final class JavaGen {
                     src.line(dest + " = new byte[" + count + "];");
                     src.line("System.arraycopy(in.b, in.p, " + dest + ", 0, " + count + ");");
                     src.line("in.p += " + count + ";");
+                } else if (podArray(type) != null) {
+                    src.line(dest + " = Wire." + podRead(type) + "(in, null);");
                 } else {
                     String count = src.fresh("count");
                     String list = src.fresh("list");
@@ -417,6 +446,40 @@ public final class JavaGen {
         return type.kind == Schema.Kind.LIST && (type.elem.kind == Schema.Kind.U8 || type.elem.kind == Schema.Kind.I8);
     }
 
+    /** Primitive array used for a numeric list, or null when the list stays boxed. */
+    private static String podArray(Schema type) {
+        if (type.kind != Schema.Kind.LIST) {
+            return null;
+        }
+        return switch (type.elem.kind) {
+            case F32 -> "float";
+            case F64 -> "double";
+            case I32 -> "int";
+            case I64, INT -> "long";
+            default -> null;
+        };
+    }
+
+    private static String podPut(Schema type) {
+        return switch (type.elem.kind) {
+            case F32 -> "putF32s";
+            case F64 -> "putF64s";
+            case I32 -> "putI32s";
+            case I64, INT -> "putI64s";
+            default -> throw new IllegalArgumentException(type.elem.kind.name());
+        };
+    }
+
+    private static String podRead(Schema type) {
+        return switch (type.elem.kind) {
+            case F32 -> "readF32s";
+            case F64 -> "readF64s";
+            case I32 -> "readI32s";
+            case I64, INT -> "readI64s";
+            default -> throw new IllegalArgumentException(type.elem.kind.name());
+        };
+    }
+
     static String fieldType(Schema type) {
         if (type.kind == Schema.Kind.OPT) {
             return box(type.elem);
@@ -431,7 +494,13 @@ public final class JavaGen {
             case F64 -> "double";
             case STR -> "String";
             case BYTES -> "byte[]";
-            case LIST -> rawByteList(type) ? "byte[]" : "List<" + box(type.elem) + ">";
+            case LIST -> {
+                if (rawByteList(type)) {
+                    yield "byte[]";
+                }
+                String pod = podArray(type);
+                yield pod == null ? "List<" + box(type.elem) + ">" : pod + "[]";
+            }
             case DICT -> "Map<String, " + box(type.elem) + ">";
             case STRUCT -> className(type.name);
             default -> throw new IllegalArgumentException(type.kind.name());
