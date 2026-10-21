@@ -89,7 +89,10 @@ public final class Sample {
     }
 
     public static Sample decodeFrom(Wire.In in) {
-        Sample value = new Sample();
+        return decodeInto(new Sample(), in);
+    }
+
+    public static Sample decodeInto(Sample value, Wire.In in) {
         value.name = in.str();
         value.blob = in.bytes().toArray();
         value.score = in.i32();

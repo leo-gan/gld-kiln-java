@@ -84,7 +84,7 @@ public class KilnV2CasesTest {
         Schema schema = Schema.list(Schema.struct("Row", Schema.field("a", Schema.I64)));
         long start = System.nanoTime();
         KilnException ex = org.junit.jupiter.api.Assertions.assertThrows(
-                KilnException.class, () -> Kiln.decode(schema, raw, new Kiln.Options(1_000_000_000, false)));
+                KilnException.class, () -> Kiln.decode(schema, raw, Kiln.Options.defaults().withCap(1_000_000_000)));
         assertEquals(KilnException.EOF, ex.code());
         assertTrue(System.nanoTime() - start < 2_000_000_000L, "decode allocated or ran too long");
     }

@@ -63,7 +63,10 @@ public final class Message {
     }
 
     public static Message decodeFrom(Wire.In in) {
-        Message value = new Message();
+        return decodeInto(new Message(), in);
+    }
+
+    public static Message decodeInto(Message value, Wire.In in) {
         value.f_bool = in.bool();
         value.f_int32 = in.i32();
         value.f_int64 = in.i64();
@@ -72,7 +75,10 @@ public final class Message {
         value.f_bool_2 = in.bool();
         value.f_int32_2 = in.i32();
         value.f_string_2 = in.str();
-        value.meta = Meta.decodeFrom(in);
+        if (value.meta == null) {
+            value.meta = new Meta();
+        }
+        Meta.decodeInto(value.meta, in);
         return value;
     }
 }

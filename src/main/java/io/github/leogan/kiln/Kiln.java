@@ -9,7 +9,7 @@ public final class Kiln {
     private Kiln() {}
 
     /** Cap is the maximum count and the maximum length of one string or byte run. */
-    public record Options(int cap, boolean trusted) {
+    public record Options(int cap, boolean trusted, NumericPool pool) {
         public Options {
             if (cap < 0) {
                 throw new IllegalArgumentException("cap");
@@ -17,15 +17,20 @@ public final class Kiln {
         }
 
         public static Options defaults() {
-            return new Options(DEFAULT_CAP, false);
+            return new Options(DEFAULT_CAP, false, null);
         }
 
         public Options withCap(int cap) {
-            return new Options(cap, trusted);
+            return new Options(cap, trusted, pool);
         }
 
         public Options withTrusted(boolean trusted) {
-            return new Options(cap, trusted);
+            return new Options(cap, trusted, pool);
+        }
+
+        /** Numeric lists are copied into this pool instead of a fresh array. */
+        public Options withPool(NumericPool pool) {
+            return new Options(cap, trusted, pool);
         }
     }
 
@@ -53,7 +58,16 @@ public final class Kiln {
     }
 
     public static Object decode(Schema schema, byte[] data, Options options) {
-        return Codec.decode(schema, data, 0, data.length, options.cap, options.trusted);
+        NumericPool pool = options.pool();
+        if (pool != null) {
+            pool.reset();
+        }
+        NumericPool previous = Pod.swap(pool);
+        try {
+            return Codec.decode(schema, data, 0, data.length, options.cap, options.trusted);
+        } finally {
+            Pod.swap(previous);
+        }
     }
 
     public static byte[] encodeFramed(Schema schema, Object value) {

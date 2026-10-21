@@ -29,6 +29,9 @@ final class Codec {
     }
 
     static int encodeTo(Schema schema, Object value, byte[] dest, int destOff, int cap) {
+        if (schema.fastLeaf() && value instanceof Map<?, ?> map) {
+            return FastLeaf.write(schema, map, dest, destOff, cap);
+        }
         int size = sizeOf(schema, value, cap);
         if (destOff < 0 || size > dest.length - destOff) {
             throw new IllegalArgumentException("short buffer");
@@ -40,11 +43,25 @@ final class Codec {
         return wrote;
     }
 
+    private static final ThreadLocal<Wire.In> CURSOR = ThreadLocal.withInitial(Wire.In::empty);
+
     static Object decode(Schema schema, byte[] data, int off, int len, int cap, boolean trusted) {
-        Wire.In in = new Wire.In(data, off, off + len, cap, trusted);
-        Object value = read(schema, in);
-        in.finish();
-        return value;
+        Wire.In in = CURSOR.get();
+        // A nested decode on this thread gets its own cursor. The codec does not call back into user code.
+        if (in.busy()) {
+            Wire.In fresh = new Wire.In(data, off, off + len, cap, trusted);
+            Object value = schema.fastLeaf() ? FastLeaf.read(schema, fresh) : read(schema, fresh);
+            fresh.finish();
+            return value;
+        }
+        in.reset(data, off, off + len, cap, trusted);
+        try {
+            Object value = schema.fastLeaf() ? FastLeaf.read(schema, in) : read(schema, in);
+            in.finish();
+            return value;
+        } finally {
+            in.detach();
+        }
     }
 
     static byte[] encodeFramed(Schema schema, Object value, int cap) {
@@ -330,13 +347,13 @@ final class Codec {
     }
 
     private static Object fieldOf(Schema.Field field, Map<?, ?> map) {
-        if (!map.containsKey(field.name)) {
+        Object value = map.get(field.name);
+        if (value == null && !map.containsKey(field.name)) {
             if (field.type.kind == Schema.Kind.OPT) {
                 return null;
             }
             throw new IllegalArgumentException("missing " + field.name);
         }
-        Object value = map.get(field.name);
         if (value == null && field.type.kind != Schema.Kind.OPT) {
             throw new IllegalArgumentException("null " + field.name);
         }
@@ -344,11 +361,85 @@ final class Codec {
     }
 
     private static LinkedHashMap<String, Object> readStruct(Schema schema, Wire.In in) {
-        LinkedHashMap<String, Object> map = new LinkedHashMap<>();
-        for (Schema.Field field : schema.fields()) {
-            map.put(field.name, read(field.type, in));
+        List<Schema.Field> fields = schema.fields();
+        LinkedHashMap<String, Object> map = Pod.structMap(schema, fields.size());
+        // Snapshot before a nested struct takes the next slot and replaces the flag.
+        boolean known = Pod.structSame();
+        // Same field names as the previous decode on this slot: overwrite values
+        // and keep the map entries. A different shape clears the stale keys.
+        boolean rewrite = !known && !sameKeys(map, fields);
+        if (rewrite) {
+            map.clear();
+        }
+        for (int i = 0; i < fields.size(); i++) {
+            readField(map, fields.get(i), in, rewrite);
         }
         return map;
+    }
+
+    private static boolean sameKeys(Map<String, Object> map, List<Schema.Field> fields) {
+        if (map.size() != fields.size()) {
+            return false;
+        }
+        for (int i = 0; i < fields.size(); i++) {
+            if (!map.containsKey(fields.get(i).name)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Consume one field. Unchanged scalars and the pooled array are not reboxed. */
+    private static void readField(LinkedHashMap<String, Object> map, Schema.Field field, Wire.In in, boolean rewrite) {
+        if (rewrite) {
+            map.put(field.name, read(field.type, in));
+            return;
+        }
+        Object prev = map.get(field.name);
+        switch (field.type.kind) {
+            case I32 -> {
+                int v = in.i32();
+                if (!(prev instanceof Integer n) || n.intValue() != v) {
+                    map.put(field.name, v);
+                }
+            }
+            case I64, INT, U64, UINT -> {
+                long v = in.i64();
+                if (!(prev instanceof Long n) || n.longValue() != v) {
+                    map.put(field.name, v);
+                }
+            }
+            case F32 -> {
+                float v = in.f32();
+                if (!(prev instanceof Float n) || Float.floatToRawIntBits(n) != Float.floatToRawIntBits(v)) {
+                    map.put(field.name, v);
+                }
+            }
+            case F64 -> {
+                double v = in.f64();
+                if (!(prev instanceof Double n) || Double.doubleToRawLongBits(n) != Double.doubleToRawLongBits(v)) {
+                    map.put(field.name, v);
+                }
+            }
+            case BOOL -> {
+                boolean v = in.bool();
+                if (!(prev instanceof Boolean n) || n.booleanValue() != v) {
+                    map.put(field.name, v);
+                }
+            }
+            case STR -> {
+                String v = in.str();
+                if (!v.equals(prev)) {
+                    map.put(field.name, v);
+                }
+            }
+            default -> {
+                Object v = read(field.type, in);
+                if (v != prev) {
+                    map.put(field.name, v);
+                }
+            }
+        }
     }
 
     private static int sizeList(Schema schema, Object value, int cap) {
@@ -381,26 +472,83 @@ final class Codec {
         return 4 + (int) body;
     }
 
+    private static boolean wideLong(Schema.Kind kind) {
+        return kind == Schema.Kind.I64 || kind == Schema.Kind.INT || kind == Schema.Kind.U64 || kind == Schema.Kind.UINT;
+    }
+
+    /** Count plus one little-endian copy. Big-endian hosts use the scalar writers. */
+    private static int writePod(Object values, int count, int width, long base, byte[] dest, int p, int cap) {
+        checkCount(count, cap);
+        Wire.putI32(dest, p, count);
+        int body = count * width;
+        if (Pod.LITTLE && body > 0) {
+            Pod.toWire(values, base, dest, p + 4, body);
+        } else {
+            int q = p + 4;
+            for (int i = 0; i < count; i++) {
+                q = writeScalar(values, i, width, dest, q);
+            }
+            return q;
+        }
+        return p + 4 + body;
+    }
+
+    private static int writeScalar(Object values, int i, int width, byte[] dest, int p) {
+        if (width == 4 && values instanceof float[] nums) {
+            return Wire.putF32At(dest, p, nums[i]);
+        }
+        if (width == 8 && values instanceof double[] nums) {
+            return Wire.putF64At(dest, p, nums[i]);
+        }
+        if (width == 4 && values instanceof int[] nums) {
+            Wire.putI32(dest, p, nums[i]);
+            return p + 4;
+        }
+        Wire.putI64(dest, p, ((long[]) values)[i]);
+        return p + 8;
+    }
+
+    private static Object readPod(Wire.In in, int count, int width, Object out, long base) {
+        int body = count * width;
+        if (Pod.LITTLE && body > 0) {
+            Pod.fromWire(in.b, in.p, out, base, body);
+            in.p += body;
+            return out;
+        }
+        if (out instanceof float[] nums) {
+            for (int i = 0; i < count; i++) {
+                nums[i] = in.f32();
+            }
+        } else if (out instanceof double[] nums) {
+            for (int i = 0; i < count; i++) {
+                nums[i] = in.f64();
+            }
+        } else if (out instanceof int[] nums) {
+            for (int i = 0; i < count; i++) {
+                nums[i] = in.i32();
+            }
+        } else {
+            long[] nums = (long[]) out;
+            for (int i = 0; i < count; i++) {
+                nums[i] = in.i64();
+            }
+        }
+        return out;
+    }
+
     private static int writeList(Schema schema, Object value, byte[] dest, int p, int cap) {
         Schema elem = schema.elem;
         if ((elem.kind == Schema.Kind.U8 || elem.kind == Schema.Kind.I8) && (value instanceof byte[] || value instanceof Bytes)) {
             return writeRaw(value, dest, p, cap);
         }
         if (value instanceof float[] nums && elem.kind == Schema.Kind.F32) {
-            checkCount(nums.length, cap);
-            Wire.putI32(dest, p, nums.length);
-            for (int i = 0; i < nums.length; i++) {
-                Wire.putF32At(dest, p + 4 + i * 4, nums[i]);
-            }
-            return p + 4 + nums.length * 4;
+            return writePod(nums, nums.length, 4, Pod.FLOAT, dest, p, cap);
         }
         if (value instanceof double[] nums && elem.kind == Schema.Kind.F64) {
-            checkCount(nums.length, cap);
-            Wire.putI32(dest, p, nums.length);
-            for (int i = 0; i < nums.length; i++) {
-                Wire.putF64At(dest, p + 4 + i * 8, nums[i]);
-            }
-            return p + 4 + nums.length * 8;
+            return writePod(nums, nums.length, 8, Pod.DOUBLE, dest, p, cap);
+        }
+        if (value instanceof int[] nums && elem.kind == Schema.Kind.I32) {
+            return writePod(nums, nums.length, 4, Pod.INT, dest, p, cap);
         }
         if (value instanceof int[] nums) {
             checkCount(nums.length, cap);
@@ -410,6 +558,9 @@ final class Codec {
                 q = write(elem, num, dest, q, cap);
             }
             return q;
+        }
+        if (value instanceof long[] nums && wideLong(elem.kind)) {
+            return writePod(nums, nums.length, 8, Pod.LONG, dest, p, cap);
         }
         if (value instanceof long[] nums) {
             checkCount(nums.length, cap);
@@ -450,20 +601,8 @@ final class Codec {
             return view;
         }
         return switch (elem.kind) {
-            case F32 -> {
-                float[] out = new float[count];
-                for (int i = 0; i < count; i++) {
-                    out[i] = in.f32();
-                }
-                yield out;
-            }
-            case F64 -> {
-                double[] out = new double[count];
-                for (int i = 0; i < count; i++) {
-                    out[i] = in.f64();
-                }
-                yield out;
-            }
+            case F32 -> readPod(in, count, 4, Pod.floats(count), Pod.FLOAT);
+            case F64 -> readPod(in, count, 8, Pod.doubles(count), Pod.DOUBLE);
             case BOOL -> {
                 boolean[] out = new boolean[count];
                 for (int i = 0; i < count; i++) {
@@ -471,14 +610,16 @@ final class Codec {
                 }
                 yield out;
             }
-            case I64, INT, U64, UINT, U32 -> {
+            case I64, INT, U64, UINT -> readPod(in, count, 8, Pod.longs(count), Pod.LONG);
+            case U32 -> {
                 long[] out = new long[count];
                 for (int i = 0; i < count; i++) {
                     out[i] = ((Number) read(elem, in)).longValue();
                 }
                 yield out;
             }
-            case I8, U8, I16, U16, I32 -> {
+            case I32 -> readPod(in, count, 4, Pod.ints(count), Pod.INT);
+            case I8, U8, I16, U16 -> {
                 int[] out = new int[count];
                 for (int i = 0; i < count; i++) {
                     out[i] = ((Number) read(elem, in)).intValue();
@@ -853,18 +994,21 @@ final class Codec {
     }
 
     private static void writePlan(Plan plan, byte[] dest, int p) {
-        Arrays.fill(dest, p, p + plan.total, (byte) 0);
+        int n = plan.tensors.size();
+        long directoryBytes = Wire.add(Wire.mul(n, DESC), plan.heap.length);
+        int payloadBase = (int) Wire.align64(HEADER + directoryBytes);
+        // Zero the directory and the pad in front of the payloads. The payload
+        // bytes themselves are copied, so a reused buffer is not memset twice.
+        Arrays.fill(dest, p, p + payloadBase, (byte) 0);
         dest[p] = 'K';
         dest[p + 1] = 'L';
         dest[p + 2] = 'N';
         dest[p + 3] = 'T';
         dest[p + 4] = 2;
         dest[p + 5] = (byte) plan.flags;
-        int n = plan.tensors.size();
         Wire.putI32(dest, p + 8, n);
         Wire.putI32(dest, p + 12, plan.heap.length);
         Wire.putI64(dest, p + 16, plan.payloadBytes);
-        long directoryBytes = Wire.add(Wire.mul(n, DESC), plan.heap.length);
         Wire.putI64(dest, p + 24, directoryBytes);
         for (int i = 0; i < n; i++) {
             Tensor tensor = plan.tensors.get(i);
@@ -890,12 +1034,20 @@ final class Codec {
         if (plan.heap.length > 0) {
             System.arraycopy(plan.heap, 0, dest, p + HEADER + n * DESC, plan.heap.length);
         }
-        int payloadBase = (int) Wire.align64(HEADER + directoryBytes);
+        int filled = payloadBase;
         for (int i = 0; i < n; i++) {
             Bytes data = plan.tensors.get(i).data;
-            if (data.length() > 0) {
-                data.copyTo(dest, p + payloadBase + (int) plan.byteOff[i]);
+            int at = payloadBase + (int) plan.byteOff[i];
+            if (at > filled) {
+                Arrays.fill(dest, p + filled, p + at, (byte) 0);
             }
+            if (data.length() > 0) {
+                data.copyTo(dest, p + at);
+            }
+            filled = at + data.length();
+        }
+        if (filled < plan.total) {
+            Arrays.fill(dest, p + filled, p + plan.total, (byte) 0);
         }
     }
 
@@ -1477,14 +1629,14 @@ final class Codec {
         throw new IllegalArgumentException("dict");
     }
 
-    private static boolean asBool(Object value) {
+    static boolean asBool(Object value) {
         if (value instanceof Boolean b) {
             return b;
         }
         throw new IllegalArgumentException("bool");
     }
 
-    private static String asString(Object value) {
+    static String asString(Object value) {
         if (value instanceof String s) {
             return s;
         }
@@ -1536,7 +1688,7 @@ final class Codec {
         return (int) n;
     }
 
-    private static int asI32(Object value) {
+    static int asI32(Object value) {
         long n = asNumber(value);
         if (n < Integer.MIN_VALUE || n > Integer.MAX_VALUE) {
             throw new IllegalArgumentException("i32");
@@ -1560,7 +1712,7 @@ final class Codec {
         return n;
     }
 
-    private static long asI64(Object value) {
+    static long asI64(Object value) {
         if (value instanceof BigInteger bi) {
             if (bi.bitLength() > 63 && !(bi.bitLength() == 64 && bi.signum() < 0 && bi.equals(BigInteger.valueOf(Long.MIN_VALUE)))) {
                 if (bi.compareTo(BigInteger.valueOf(Long.MIN_VALUE)) < 0
@@ -1586,7 +1738,7 @@ final class Codec {
         throw new IllegalArgumentException("u64");
     }
 
-    private static float asF32(Object value) {
+    static float asF32(Object value) {
         if (value instanceof Float f) {
             return f;
         }
@@ -1599,7 +1751,7 @@ final class Codec {
         throw new IllegalArgumentException("f32");
     }
 
-    private static double asF64(Object value) {
+    static double asF64(Object value) {
         if (value instanceof Double d) {
             return d;
         }
