@@ -1,5 +1,7 @@
 # gld-kiln-java
 
+[Serialization](https://leo-gan.github.io/serialization/) is the hub for the theory, the history, and the benchmarks.
+
 A from-scratch Kiln wire v2 library for Java.
 The runtime and the code generator are Java. They do not wrap, link, or vendor
 another language's Kiln implementation.
