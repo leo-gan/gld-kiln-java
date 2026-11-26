@@ -1,5 +1,8 @@
 package io.github.leogan.kiln;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
@@ -9,6 +12,13 @@ public final class Wire {
     public static final long FNV_OFFSET = 0xCBF29CE484222325L;
     public static final long FNV_PRIME = 0x100000001B3L;
     static final long MASK = -1L;
+
+    private static final VarHandle SHORT_LE =
+            MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.LITTLE_ENDIAN);
+    private static final VarHandle INT_LE =
+            MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.LITTLE_ENDIAN);
+    private static final VarHandle LONG_LE =
+            MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
 
     private Wire() {}
 
@@ -60,10 +70,19 @@ public final class Wire {
     }
 
     static boolean ascii(byte[] b, int off, int len) {
-        for (int i = off; i < off + len; i++) {
+        int i = off;
+        int end = off + len;
+        while (i + 8 <= end) {
+            if (((long) LONG_LE.get(b, i) & 0x8080808080808080L) != 0L) {
+                return false;
+            }
+            i += 8;
+        }
+        while (i < end) {
             if (b[i] < 0) {
                 return false;
             }
+            i++;
         }
         return true;
     }
@@ -71,6 +90,12 @@ public final class Wire {
     public static boolean isUtf8(byte[] b, int off, int len) {
         int i = off;
         int end = off + len;
+        while (i + 8 <= end) {
+            if (((long) LONG_LE.get(b, i) & 0x8080808080808080L) != 0L) {
+                break;
+            }
+            i += 8;
+        }
         while (i < end) {
             int c = b[i] & 0xFF;
             if (c <= 0x7F) {
@@ -138,20 +163,15 @@ public final class Wire {
     }
 
     public static void putI16(byte[] a, int i, int v) {
-        a[i] = (byte) v;
-        a[i + 1] = (byte) (v >>> 8);
+        SHORT_LE.set(a, i, (short) v);
     }
 
     public static void putI32(byte[] a, int i, int v) {
-        a[i] = (byte) v;
-        a[i + 1] = (byte) (v >>> 8);
-        a[i + 2] = (byte) (v >>> 16);
-        a[i + 3] = (byte) (v >>> 24);
+        INT_LE.set(a, i, v);
     }
 
     public static void putI64(byte[] a, int i, long v) {
-        putI32(a, i, (int) v);
-        putI32(a, i + 4, (int) (v >>> 32));
+        LONG_LE.set(a, i, v);
     }
 
     public static int getI8(byte[] a, int i) {
@@ -163,26 +183,23 @@ public final class Wire {
     }
 
     public static int getI16(byte[] a, int i) {
-        return (short) ((a[i] & 0xFF) | (a[i + 1] << 8));
+        return (short) SHORT_LE.get(a, i);
     }
 
     public static int getU16(byte[] a, int i) {
-        return (a[i] & 0xFF) | ((a[i + 1] & 0xFF) << 8);
+        return ((short) SHORT_LE.get(a, i)) & 0xFFFF;
     }
 
     public static int getI32(byte[] a, int i) {
-        return (a[i] & 0xFF)
-                | ((a[i + 1] & 0xFF) << 8)
-                | ((a[i + 2] & 0xFF) << 16)
-                | (a[i + 3] << 24);
+        return (int) INT_LE.get(a, i);
     }
 
     public static long getU32(byte[] a, int i) {
-        return getI32(a, i) & 0xFFFFFFFFL;
+        return ((int) INT_LE.get(a, i)) & 0xFFFFFFFFL;
     }
 
     public static long getI64(byte[] a, int i) {
-        return (getU32(a, i)) | (getI32(a, i + 4) & 0xFFFFFFFFL) << 32;
+        return (long) LONG_LE.get(a, i);
     }
 
     public static int putBoolAt(byte[] a, int i, boolean v) {
@@ -528,13 +545,19 @@ public final class Wire {
             int len = (int) n;
             int off = p;
             p += len;
-            if (len <= 64 && ascii(b, off, len)) {
-                return cachedAscii(off, len);
+            if (len == 0) {
+                return "";
             }
-            if (!isUtf8(b, off, len)) {
-                if (!trusted) {
-                    throw KilnException.utf8();
+            if (ascii(b, off, len)) {
+                if (len <= 64) {
+                    return cachedAscii(off, len);
                 }
+                return new String(b, off, len, StandardCharsets.ISO_8859_1);
+            }
+            if (!trusted && !isUtf8(b, off, len)) {
+                throw KilnException.utf8();
+            }
+            if (trusted && !isUtf8(b, off, len)) {
                 return new String(b, off, len, StandardCharsets.ISO_8859_1);
             }
             return new String(b, off, len, StandardCharsets.UTF_8);
@@ -560,12 +583,11 @@ public final class Wire {
             if (count > cap) {
                 throw KilnException.limit();
             }
-            if (eachMin != 0 && Long.compareUnsigned(count, Long.divideUnsigned(MASK, eachMin)) > 0) {
-                throw KilnException.limit();
-            }
-            long need = count * (long) eachMin;
-            if (Long.compareUnsigned(need, remaining()) > 0) {
-                throw KilnException.eof();
+            if (eachMin > 0) {
+                long need = count * (long) eachMin;
+                if (need < 0 || need > remaining()) {
+                    throw KilnException.eof();
+                }
             }
             return (int) count;
         }
@@ -638,6 +660,11 @@ public final class Wire {
             a[n++] = (byte) v;
         }
 
+        public void bool(boolean v) {
+            need(1);
+            a[n++] = (byte) (v ? 1 : 0);
+        }
+
         public void i32(int v) {
             need(4);
             putI32(a, n, v);
@@ -648,6 +675,79 @@ public final class Wire {
             need(8);
             putI64(a, n, v);
             n += 8;
+        }
+
+        public void f32(float v) {
+            i32(Float.floatToRawIntBits(v));
+        }
+
+        public void f64(double v) {
+            i64(Double.doubleToRawLongBits(v));
+        }
+
+        public void count(int count) {
+            if (count < 0 || count > DEFAULT_CAP) {
+                throw KilnException.limit();
+            }
+            i32(count);
+        }
+
+        public void str(String s) {
+            int len = s.length();
+            if (len > DEFAULT_CAP) {
+                throw KilnException.limit();
+            }
+            need(4 + len);
+            int start = n + 4;
+            byte[] buf = a;
+            int i = 0;
+            for (; i < len; i++) {
+                char c = s.charAt(i);
+                if (c > 0x7F) {
+                    break;
+                }
+                buf[start + i] = (byte) c;
+            }
+            if (i == len) {
+                putI32(buf, n, len);
+                n = start + len;
+                return;
+            }
+            byte[] raw = s.getBytes(StandardCharsets.UTF_8);
+            if (raw.length > DEFAULT_CAP) {
+                throw KilnException.limit();
+            }
+            need(4 + raw.length);
+            putI32(a, n, raw.length);
+            System.arraycopy(raw, 0, a, n + 4, raw.length);
+            n += 4 + raw.length;
+        }
+
+        public void f64s(double[] values) {
+            int count = values.length;
+            if (count > DEFAULT_CAP) {
+                throw KilnException.limit();
+            }
+            need(4 + count * 8);
+            n = putF64s(a, n, values, DEFAULT_CAP);
+        }
+
+        public void f32s(float[] values) {
+            int count = values.length;
+            if (count > DEFAULT_CAP) {
+                throw KilnException.limit();
+            }
+            need(4 + count * 4);
+            n = putF32s(a, n, values, DEFAULT_CAP);
+        }
+
+        public void i64s(long[] values) {
+            int count = values.length;
+            if (count > DEFAULT_CAP) {
+                throw KilnException.limit();
+            }
+            need(4 + count * 8);
+            n = putI64s(a, n, values, DEFAULT_CAP);
         }
 
         public void raw(byte[] src, int off, int len) {
